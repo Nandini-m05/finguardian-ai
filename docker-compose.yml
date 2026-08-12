@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: finguardian-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: finguardian
+      POSTGRES_PASSWORD: finguardian_dev_password
+      POSTGRES_DB: finguardian_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
