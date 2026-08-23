@@ -5,7 +5,7 @@ from app.config import settings
 from app.database import async_session, get_db
 from app.models import User
 from app.schemas import UserCreate, UserOut
-from app.security import hash_password
+from app.security import hash_password, verify_password, create_access_token
 
 app = FastAPI()
 
@@ -40,4 +40,15 @@ async def register(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
     await db.refresh(new_user)
 
     return new_user
+
+@app.post("/login")
+async def login(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(User).where(User.email == user_data.email))
+    user = result.scalar_one_or_none()
+
+    if not user or not verify_password(user_data.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Incorrect email or password")
+
+    access_token = create_access_token(data={"sub": user.email})
+    return {"access_token": access_token, "token_type": "bearer"}
  
