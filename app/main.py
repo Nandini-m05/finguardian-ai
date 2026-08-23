@@ -7,6 +7,7 @@ from app.models import User
 from app.schemas import UserCreate, UserOut
 from app.security import hash_password, verify_password, create_access_token
 from app.dependencies import get_current_user
+from app.dependencies import get_current_user, require_role
 
 app = FastAPI()
 
@@ -56,4 +57,8 @@ async def login(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
 @app.get("/me", response_model=UserOut)
 async def read_current_user(current_user: User = Depends(get_current_user)):
     return current_user
+
+@app.get("/admin-only")
+async def admin_only_route(current_user: User = Depends(require_role("admin"))):
+    return {"message": f"Welcome, admin {current_user.email}"}
 
