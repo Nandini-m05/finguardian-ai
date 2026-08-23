@@ -6,6 +6,7 @@ from app.database import async_session, get_db
 from app.models import User
 from app.schemas import UserCreate, UserOut
 from app.security import hash_password, verify_password, create_access_token
+from app.dependencies import get_current_user
 
 app = FastAPI()
 
@@ -51,4 +52,8 @@ async def login(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
 
     access_token = create_access_token(data={"sub": user.email})
     return {"access_token": access_token, "token_type": "bearer"}
- 
+
+@app.get("/me", response_model=UserOut)
+async def read_current_user(current_user: User = Depends(get_current_user)):
+    return current_user
+
