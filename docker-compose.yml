@@ -20,6 +20,14 @@ services:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
 
+  redis:
+    image: redis:7-alpine
+    container_name: finguardian-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
 volumes:
   postgres_data:
-
+  redis_data:

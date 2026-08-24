@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     jwt_secret: str
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60
+    redis_url: str = "redis://localhost:6379"
 
     class Config:
         env_file = ".env"
