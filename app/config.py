@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 60
     redis_url: str = "redis://localhost:6379"
     langgraph_db_url: str
+    alpha_vantage_api_key: str
 
     class Config:
         env_file = ".env"
