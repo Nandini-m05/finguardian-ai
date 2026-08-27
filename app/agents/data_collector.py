@@ -3,8 +3,10 @@ import yfinance as yf
 from datetime import datetime, timezone
 from app.config import settings
 from app.agents.state import AgentState
+from app.events.redis_client import publish_event
 
 ALPHA_VANTAGE_BASE_URL = "https://www.alphavantage.co/query"
+DATA_COLLECTOR_STREAM = "data_collector_events"
 
 
 def fetch_market_data(symbol: str) -> dict:
@@ -28,12 +30,7 @@ def fetch_market_data(symbol: str) -> dict:
 
 
 async def fetch_news_data(symbol: str, limit: int = 10) -> list[dict]:
-    """Pull recent news headlines for a symbol from Alpha Vantage News & Sentiment.
-
-    Note: we deliberately ignore Alpha Vantage's built-in sentiment scores here.
-    Sentiment scoring is the News Intelligence Agent's job (via FinBERT) later
-    in the pipeline — Data Collector only hands off raw material.
-    """
+    """Pull recent news headlines for a symbol from Alpha Vantage News & Sentiment."""
     params = {
         "function": "NEWS_SENTIMENT",
         "tickers": symbol,
@@ -47,12 +44,10 @@ async def fetch_news_data(symbol: str, limit: int = 10) -> list[dict]:
         data = response.json()
 
     if "feed" not in data:
-        # Rate-limited or malformed response - Alpha Vantage returns
-        # {"Information": "..."} or {"Note": "..."} in these cases
         print(f"[DataCollector] News fetch issue: {data}")
         return []
 
-    articles = data["feed"][:limit]  # Limit the number of articles returned
+    articles = data["feed"][:limit]  # enforce the cap ourselves - AV doesn't reliably honor it
 
     return [
         {
@@ -69,9 +64,18 @@ async def fetch_news_data(symbol: str, limit: int = 10) -> list[dict]:
 async def data_collector_node(state: AgentState) -> dict:
     """LangGraph node: Data Collector Agent."""
     symbol = state["symbol"]
+    request_id = state["request_id"]
 
     market_data = fetch_market_data(symbol)
     news_data = await fetch_news_data(symbol)
+
+    await publish_event(DATA_COLLECTOR_STREAM, {
+        "request_id": request_id,
+        "symbol": symbol,
+        "status": "completed",
+        "articles_count": len(news_data),
+        "published_at": datetime.now(timezone.utc).isoformat(),
+    })
 
     return {
         "raw_market_data": market_data,
@@ -79,5 +83,6 @@ async def data_collector_node(state: AgentState) -> dict:
         "agent_log": [
             f"[DataCollector] Fetched market data for {symbol} at {market_data['fetched_at']}",
             f"[DataCollector] Fetched {len(news_data)} news articles for {symbol}",
+            f"[DataCollector] Published completion event to Redis Stream '{DATA_COLLECTOR_STREAM}'",
         ],
     }
