@@ -1,4 +1,4 @@
-import statistics
+import numpy as np
 from app.agents.state import AgentState
 
 
@@ -10,6 +10,8 @@ def compute_technical_indicators(market_data: dict) -> dict:
     longer price history and will come as a pass 2, later.
     """
     closes = market_data.get("recent_closes", [])
+    closes = [c for c in closes if c is not None and c == c]  # drop NaNs (NaN != NaN is always True)
+
     current_price = market_data.get("current_price")
     previous_close = market_data.get("previous_close")
 
@@ -23,7 +25,7 @@ def compute_technical_indicators(market_data: dict) -> dict:
     if five_day_high is not None and five_day_low:
         five_day_range_pct = round((five_day_high - five_day_low) / five_day_low * 100, 2)
 
-    volatility = round(statistics.stdev(closes), 2) if len(closes) >= 2 else None
+    volatility = round(float(np.std(closes, ddof=1)), 2) if len(closes) >= 2 else None
 
     momentum = "flat"
     if len(closes) >= 2:
@@ -40,7 +42,6 @@ def compute_technical_indicators(market_data: dict) -> dict:
         "volatility": volatility,
         "momentum": momentum,
     }
-
 
 def build_market_summary(symbol: str, indicators: dict) -> str:
     change = indicators["price_change_pct"] or 0
