@@ -12,11 +12,12 @@ from fastapi import FastAPI, Depends, HTTPException, Request
 from sqlalchemy import text, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.types import Command
 
 from app.config import settings
 from app.database import async_session, get_db
 from app.models import User
-from app.schemas import UserCreate, UserOut, AnalysisRequest, AnalysisResponse
+from app.schemas import UserCreate, UserOut, AnalysisRequest, AnalysisResponse, ResumeDecisionRequest
 from app.security import hash_password, verify_password, create_access_token
 from app.dependencies import get_current_user, require_role
 from app.graph import build_graph
@@ -24,10 +25,6 @@ from app.graph import build_graph
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Open the Postgres checkpointer once at startup, reuse it for every
-    request, close it cleanly at shutdown - instead of reopening a fresh
-    connection per request like the test scripts did.
-    """
     async with AsyncExitStack() as stack:
         checkpointer = await stack.enter_async_context(
             AsyncPostgresSaver.from_conn_string(settings.langgraph_db_url)
@@ -92,6 +89,31 @@ async def admin_only_route(current_user: User = Depends(require_role("admin"))):
     return {"message": f"Welcome, admin {current_user.email}"}
 
 
+def _build_analysis_response(request_id: str, thread_id: str, symbol: str, result: dict) -> AnalysisResponse:
+    """Turn a graph result into a response, for both the paused and completed
+    cases, from one place - so /analyze and /resume can't drift apart the
+    way two hand-duplicated copies already did once this session.
+    """
+    is_paused = "__interrupt__" in result
+    return AnalysisResponse(
+        request_id=request_id,
+        thread_id=thread_id,
+        status="pending_review" if is_paused else "completed",
+        symbol=symbol,
+        risk_score=result.get("risk_score"),
+        risk_factors=result.get("risk_factors"),
+        fraud_flag=result.get("fraud_flag"),
+        fraud_confidence=result.get("fraud_confidence"),
+        shap_explanation=result.get("shap_explanation"),
+        requires_human_review=result.get("requires_human_review"),
+        human_decision=result.get("human_decision"),
+        recommendation=result.get("recommendation"),
+        decision_rationale=result.get("decision_rationale"),
+        final_report=result.get("final_report"),
+        alerts_sent=result.get("alerts_sent") or [],
+    )
+
+
 @app.post("/analyze", response_model=AnalysisResponse)
 async def analyze_symbol(
     payload: AnalysisRequest,
@@ -112,16 +134,27 @@ async def analyze_symbol(
     }
 
     result = await graph.ainvoke(initial_state, config)
+    return _build_analysis_response(request_id, thread_id, payload.symbol.upper(), result)
 
-    return AnalysisResponse(
-        request_id=request_id,
-        symbol=payload.symbol.upper(),
-        risk_score=result.get("risk_score"),
-        fraud_flag=result.get("fraud_flag"),
-        requires_human_review=result.get("requires_human_review"),
-        human_decision=result.get("human_decision"),
-        recommendation=result.get("recommendation"),
-        decision_rationale=result.get("decision_rationale"),
-        final_report=result.get("final_report"),
-        alerts_sent=result.get("alerts_sent") or [],
-    )
+
+@app.post("/analyze/{thread_id}/resume", response_model=AnalysisResponse)
+async def resume_analysis(
+    thread_id: str,
+    payload: ResumeDecisionRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Submit a human reviewer's decision for a paused analysis and let the
+    graph run the remaining agents to completion."""
+    graph = request.app.state.graph
+    config = {"configurable": {"thread_id": thread_id}}
+
+    state = await graph.aget_state(config)
+    if not state.next:
+        raise HTTPException(status_code=400, detail="This analysis is not currently paused for review.")
+
+    result = await graph.ainvoke(Command(resume=payload.decision), config)
+
+    symbol = state.values.get("symbol", "UNKNOWN")
+    request_id = state.values.get("request_id", "unknown")
+    return _build_analysis_response(request_id, thread_id, symbol, result)
