@@ -1,15 +1,44 @@
-from fastapi import FastAPI, Depends, HTTPException
+import sys
+import asyncio
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+import uuid
+from contextlib import asynccontextmanager, AsyncExitStack
+from datetime import datetime, timezone
+
+from fastapi import FastAPI, Depends, HTTPException, Request
 from sqlalchemy import text, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
 from app.config import settings
 from app.database import async_session, get_db
 from app.models import User
-from app.schemas import UserCreate, UserOut
+from app.schemas import UserCreate, UserOut, AnalysisRequest, AnalysisResponse
 from app.security import hash_password, verify_password, create_access_token
-from app.dependencies import get_current_user
 from app.dependencies import get_current_user, require_role
+from app.graph import build_graph
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Open the Postgres checkpointer once at startup, reuse it for every
+    request, close it cleanly at shutdown - instead of reopening a fresh
+    connection per request like the test scripts did.
+    """
+    async with AsyncExitStack() as stack:
+        checkpointer = await stack.enter_async_context(
+            AsyncPostgresSaver.from_conn_string(settings.langgraph_db_url)
+        )
+        await checkpointer.setup()
+        app.state.graph = build_graph(checkpointer)
+        yield
+
+
+app = FastAPI(lifespan=lifespan)
+
 
 @app.get("/")
 def read_root():
@@ -62,3 +91,37 @@ async def read_current_user(current_user: User = Depends(get_current_user)):
 async def admin_only_route(current_user: User = Depends(require_role("admin"))):
     return {"message": f"Welcome, admin {current_user.email}"}
 
+
+@app.post("/analyze", response_model=AnalysisResponse)
+async def analyze_symbol(
+    payload: AnalysisRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Run the full 8-agent FinGuardian pipeline for a symbol."""
+    graph = request.app.state.graph
+    request_id = f"req-{uuid.uuid4().hex[:8]}"
+    thread_id = f"analysis-{uuid.uuid4().hex[:8]}"
+    config = {"configurable": {"thread_id": thread_id}}
+
+    initial_state = {
+        "request_id": request_id,
+        "symbol": payload.symbol.upper(),
+        "asset_type": payload.asset_type,
+        "requested_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    result = await graph.ainvoke(initial_state, config)
+
+    return AnalysisResponse(
+        request_id=request_id,
+        symbol=payload.symbol.upper(),
+        risk_score=result.get("risk_score"),
+        fraud_flag=result.get("fraud_flag"),
+        requires_human_review=result.get("requires_human_review"),
+        human_decision=result.get("human_decision"),
+        recommendation=result.get("recommendation"),
+        decision_rationale=result.get("decision_rationale"),
+        final_report=result.get("final_report"),
+        alerts_sent=result.get("alerts_sent") or [],
+    )
