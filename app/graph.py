@@ -39,3 +39,4 @@ def build_graph(checkpointer):
     builder.add_edge("report", "alert_notification")
     builder.add_edge("alert_notification", END)
     return builder.compile(checkpointer=checkpointer)
+ 
