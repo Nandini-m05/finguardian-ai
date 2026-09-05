@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from app.agents.state import AgentState
 from app.events.redis_client import publish_event
+from app.tasks import deliver_alert
 
 ALERTS_STREAM = "alert_events"
 
@@ -55,8 +56,12 @@ async def alert_notification_node(state: AgentState) -> dict:
         "recommendation": alert["recommendation"] or "",
         "triggered_at": alert["triggered_at"],
     })
-
+    # Redis Stream above is the durable audit trail. This is the separate
+    # handoff to Celery for actual delivery - fire-and-forget, doesn't
+    # block the graph waiting for the worker to pick it up.
+    deliver_alert.delay(alert)
     return {
         "alerts_sent": [alert],
         "agent_log": [f"[AlertNotification] {alert['severity'].upper()} alert for {symbol}: {alert['reason']}"],
     }
+
