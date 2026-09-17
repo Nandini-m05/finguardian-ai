@@ -16,7 +16,7 @@ from langgraph.types import Command
 
 from app.config import settings
 from app.database import async_session, get_db
-from app.models import User
+from app.models import User, Analysis
 from app.schemas import UserCreate, UserOut, AnalysisRequest, AnalysisResponse, ResumeDecisionRequest
 from app.security import hash_password, verify_password, create_access_token
 from app.dependencies import get_current_user, require_role
@@ -90,10 +90,6 @@ async def admin_only_route(current_user: User = Depends(require_role("admin"))):
 
 
 def _build_analysis_response(request_id: str, thread_id: str, symbol: str, result: dict) -> AnalysisResponse:
-    """Turn a graph result into a response, for both the paused and completed
-    cases, from one place - so /analyze and /resume can't drift apart the
-    way two hand-duplicated copies already did once this session.
-    """
     is_paused = "__interrupt__" in result
     return AnalysisResponse(
         request_id=request_id,
@@ -114,13 +110,58 @@ def _build_analysis_response(request_id: str, thread_id: str, symbol: str, resul
     )
 
 
+async def _save_analysis_record(db: AsyncSession, response: AnalysisResponse, requested_by: int | None) -> None:
+    """Upsert one row per thread_id - insert on first save (often
+    'pending_review'), update that same row on resume (now 'completed'),
+    rather than ending up with two disconnected rows for one analysis.
+    """
+    existing = await db.get(Analysis, response.thread_id)
+
+    if existing is None:
+        record = Analysis(
+            thread_id=response.thread_id,
+            request_id=response.request_id,
+            symbol=response.symbol,
+            asset_type="stock",
+            status=response.status,
+            risk_score=response.risk_score,
+            risk_factors=response.risk_factors,
+            fraud_flag=response.fraud_flag,
+            fraud_confidence=response.fraud_confidence,
+            shap_explanation=response.shap_explanation,
+            requires_human_review=response.requires_human_review,
+            human_decision=response.human_decision,
+            recommendation=response.recommendation,
+            decision_rationale=response.decision_rationale,
+            final_report=response.final_report,
+            alerts_sent=response.alerts_sent,
+            requested_by=requested_by,
+        )
+        db.add(record)
+    else:
+        existing.status = response.status
+        existing.risk_score = response.risk_score
+        existing.risk_factors = response.risk_factors
+        existing.fraud_flag = response.fraud_flag
+        existing.fraud_confidence = response.fraud_confidence
+        existing.shap_explanation = response.shap_explanation
+        existing.requires_human_review = response.requires_human_review
+        existing.human_decision = response.human_decision
+        existing.recommendation = response.recommendation
+        existing.decision_rationale = response.decision_rationale
+        existing.final_report = response.final_report
+        existing.alerts_sent = response.alerts_sent
+
+    await db.commit()
+
+
 @app.post("/analyze", response_model=AnalysisResponse)
 async def analyze_symbol(
     payload: AnalysisRequest,
     request: Request,
     current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    """Run the full 8-agent FinGuardian pipeline for a symbol."""
     graph = request.app.state.graph
     request_id = f"req-{uuid.uuid4().hex[:8]}"
     thread_id = f"analysis-{uuid.uuid4().hex[:8]}"
@@ -134,7 +175,9 @@ async def analyze_symbol(
     }
 
     result = await graph.ainvoke(initial_state, config)
-    return _build_analysis_response(request_id, thread_id, payload.symbol.upper(), result)
+    response = _build_analysis_response(request_id, thread_id, payload.symbol.upper(), result)
+    await _save_analysis_record(db, response, current_user.id)
+    return response
 
 
 @app.post("/analyze/{thread_id}/resume", response_model=AnalysisResponse)
@@ -143,9 +186,8 @@ async def resume_analysis(
     payload: ResumeDecisionRequest,
     request: Request,
     current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    """Submit a human reviewer's decision for a paused analysis and let the
-    graph run the remaining agents to completion."""
     graph = request.app.state.graph
     config = {"configurable": {"thread_id": thread_id}}
 
@@ -157,4 +199,6 @@ async def resume_analysis(
 
     symbol = state.values.get("symbol", "UNKNOWN")
     request_id = state.values.get("request_id", "unknown")
-    return _build_analysis_response(request_id, thread_id, symbol, result)
+    response = _build_analysis_response(request_id, thread_id, symbol, result)
+    await _save_analysis_record(db, response, current_user.id)
+    return response
