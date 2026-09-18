@@ -14,6 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.types import Command
 
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
 from app.config import settings
 from app.database import async_session, get_db
 from app.models import User, Analysis
@@ -36,6 +40,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 @app.get("/")
 def read_root():
@@ -156,6 +163,7 @@ async def _save_analysis_record(db: AsyncSession, response: AnalysisResponse, re
 
 
 @app.post("/analyze", response_model=AnalysisResponse)
+@limiter.limit("5/minute")
 async def analyze_symbol(
     payload: AnalysisRequest,
     request: Request,
