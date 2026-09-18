@@ -1,4 +1,9 @@
+import resend
+from app.config import settings
 from app.celery_app import celery_app
+
+resend.api_key = settings.resend_api_key
+
 
 @celery_app.task
 def ping() -> str:
@@ -7,13 +12,29 @@ def ping() -> str:
 
 @celery_app.task(name="deliver_alert")
 def deliver_alert(alert: dict) -> dict:
-    """Deliver a single alert. Placeholder for a real provider (SendGrid,
-    Twilio, etc.) - the point of this task is proving the async handoff
-    works; swapping in a real provider later won't change anything about
-    how alert_notification_node calls this.
+    """Deliver a single alert via Resend. A failed send never crashes the
+    task or the worker - the durable record already exists in Redis
+    Streams (written before this task runs), so a delivery failure here
+    is recoverable, not a pipeline failure.
     """
-    print(
-        f"[ALERT DELIVERY] {alert['severity'].upper()} - {alert['symbol']}: "
-        f"{alert['reason']} (risk_score={alert['risk_score']})"
+    subject = "[FinGuardian AI] " + alert["severity"].upper() + " Alert - " + alert["symbol"]
+    html = (
+        "<h2>" + alert["severity"].upper() + " Alert: " + alert["symbol"] + "</h2>"
+        + "<p><strong>Reason:</strong> " + alert["reason"] + "</p>"
+        + "<p><strong>Risk score:</strong> " + str(alert["risk_score"]) + "/100</p>"
+        + "<p><strong>Recommendation:</strong> " + str(alert.get("recommendation") or "N/A").upper() + "</p>"
+        + "<p><strong>Triggered at:</strong> " + alert["triggered_at"] + "</p>"
     )
-    return {"delivered": True, "symbol": alert["symbol"], "severity": alert["severity"]}
+
+    try:
+        response = resend.Emails.send({
+            "from": "FinGuardian AI <onboarding@resend.dev>",
+            "to": settings.alert_recipient_email,
+            "subject": subject,
+            "html": html,
+        })
+        print("[ALERT DELIVERY] Sent via Resend, id: " + str(response.get("id")))
+        return {"delivered": True, "symbol": alert["symbol"], "severity": alert["severity"], "email_id": response.get("id")}
+    except Exception as e:
+        print("[ALERT DELIVERY] FAILED for " + alert["symbol"] + ": " + str(e))
+        return {"delivered": False, "symbol": alert["symbol"], "severity": alert["severity"], "error": str(e)}

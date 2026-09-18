@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379"
     langgraph_db_url: str
     alpha_vantage_api_key: str
+    resend_api_key: str
+    alert_recipient_email: str
 
     class Config:
         env_file = ".env"
