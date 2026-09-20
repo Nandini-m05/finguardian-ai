@@ -25,31 +25,34 @@ A client sends `POST /analyze` with a stock symbol. Behind that single request, 
 
 ## Architecture
 
-```
-POST /analyze
-      │
-      ▼
-┌─────────────────┐     ┌──────────────────┐     ┌───────────────────┐
-│  Data Collector  │────▶│  Market Analysis  │────▶│ News Intelligence  │
-│ yfinance + Alpha │     │  Technical         │     │  FinBERT sentiment │
-│ Vantage News API │     │  indicators        │     │  scoring           │
-└─────────────────┘     └──────────────────┘     └───────────────────┘
-                                                              │
-                                                              ▼
-┌─────────────────┐     ┌──────────────────┐     ┌───────────────────┐
-│ Risk Assessment  │────▶│ Fraud Detection   │────▶│   Human Review     │
-│  Rule-based,      │     │ XGBoost +         │     │  interrupt() /     │
-│  weighted score    │     │ Isolation Forest  │     │  Command(resume)   │
-│  (0-100)           │     │ + SHAP            │     │  when flagged      │
-└─────────────────┘     └──────────────────┘     └───────────────────┘
-                                                              │
-                                                              ▼
-┌─────────────────┐     ┌──────────────────┐     ┌───────────────────┐
-│  Recommendation  │────▶│ Explainability /  │────▶│ Alert &            │
-│  buy / hold /     │     │ Report            │     │ Notification       │
-│  avoid             │     │  Human-readable    │     │  Redis Stream +    │
-│                     │     │  synthesis          │     │  Celery → Resend   │
-└─────────────────┘     └──────────────────┘     └───────────────────┘
+```mermaid
+flowchart TD
+    Client([Client]) -->|"POST /analyze"| API[FastAPI]
+
+    subgraph Pipeline["LangGraph Pipeline — Postgres-checkpointed"]
+        DC["1. Data Collector"] --> MA["2. Market Analysis"]
+        MA --> NI["3. News Intelligence"]
+        NI --> RA["4. Risk Assessment"]
+        RA --> FD["5. Fraud Detection"]
+        FD --> HR{"Human Review"}
+        HR -->|"clean: auto-approved"| REC["6. Recommendation"]
+        HR -->|"flagged: interrupt()"| PAUSE(["Paused — waits for analyst"])
+        PAUSE -.->|"POST /analyze/{thread_id}/resume"| HR
+        HR -->|"approved / rejected"| REC
+        REC --> REP["7. Explainability / Report"]
+        REP --> AN["8. Alert & Notification"]
+    end
+
+    API --> DC
+    AN --> API
+    API -->|"JSON response"| Client
+
+    DC -.-> YF[("yfinance")]
+    DC -.-> AV[("Alpha Vantage News")]
+    NI -.-> FB[("FinBERT")]
+    FD -.-> ML[("XGBoost + Isolation Forest + SHAP")]
+    AN -.-> RS[("Redis Streams — audit trail")]
+    AN -.-> CW["Celery Worker"] -.-> EM[("Resend — email")]
 ```
 
 **State** flows through all nodes as a single typed `AgentState` (a `TypedDict`), checkpointed to Postgres after every node via `AsyncPostgresSaver`. Fields use LangGraph reducers where they should accumulate (`agent_log`, `alerts_sent`) and plain overwrite where only the latest value matters (`risk_score`, `recommendation`, etc.).
