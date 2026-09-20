@@ -248,11 +248,24 @@ A few non-obvious things worth knowing if you're setting this up fresh, particul
 
 ## Testing
 
-Verification so far has been done through targeted scripts (`app/test_*.py`) exercising each agent individually and in combination, plus manual end-to-end testing via Swagger. A `pytest` suite covering the core agents and API routes is planned as follow-up work.
+An automated `pytest` suite (`tests/`) covers the deterministic agent logic and API authentication:
+
+```bash
+pytest -v
+```
+
+- **Market Analysis** — technical indicator calculations, including a regression test for a NaN-handling bug found during development
+- **Risk Assessment** — weighted scoring matches hand-calculated expected values
+- **Recommendation** — most importantly, that a human reviewer's decision always overrides model output, never the reverse
+- **Alert & Notification** — severity triggers (critical / warning / none)
+- **Graph wiring** — the full 8-agent graph compiles with every expected node
+- **API auth** — registration, login, wrong-password rejection, and that protected routes reject unauthenticated requests
+
+Deliberately not covered: a real end-to-end `/analyze` call, since that would spend a genuine Alpha Vantage API request (25/day free tier) on every test run. That path is verified manually and via the standalone `app/test_*.py` scripts instead.
 
 ## Roadmap
 
-- [ ] Automated `pytest` test suite
+- [x] Automated `pytest` test suite
 - [ ] MinIO integration for storing generated reports/filings
 - [ ] Observability stack (Prometheus, Grafana, OpenTelemetry, Loki)
 - [ ] Custom domain verification with Resend (removes the single-recipient sandbox restriction)
