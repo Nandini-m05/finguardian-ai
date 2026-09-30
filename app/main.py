@@ -21,7 +21,7 @@ from slowapi.errors import RateLimitExceeded
 from app.config import settings
 from app.database import async_session, get_db
 from app.models import User, Analysis
-from app.schemas import UserCreate, UserOut, AnalysisRequest, AnalysisResponse, ResumeDecisionRequest
+from app.schemas import UserCreate, UserOut, AnalysisRequest, AnalysisResponse, ResumeDecisionRequest, AnalysisSummary, AdminPendingReview
 from app.security import hash_password, verify_password, create_access_token
 from app.dependencies import get_current_user, require_role
 from app.graph import build_graph
@@ -119,9 +119,10 @@ def _build_analysis_response(request_id: str, thread_id: str, symbol: str, resul
 
 async def _save_analysis_record(db: AsyncSession, response: AnalysisResponse, requested_by: int | None) -> None:
     """Upsert one row per thread_id - insert on first save (often
-    'pending_review'), update that same row on resume (now 'completed'),
-    rather than ending up with two disconnected rows for one analysis.
-    """
+    'pending_review'), update that same row on resume (now 'completed').
+    requested_by is only used on insert; the update branch never touches
+    it, so passing the resuming admin's id here on a resume is harmless -
+    the original requester is preserved automatically."""
     existing = await db.get(Analysis, response.thread_id)
 
     if existing is None:
@@ -193,9 +194,20 @@ async def resume_analysis(
     thread_id: str,
     payload: ResumeDecisionRequest,
     request: Request,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
 ):
+    """Admin-only: a human's decision always overrides the model, and only
+    an admin/analyst account - never the user who triggered the analysis -
+    can supply that decision. An admin also cannot review their own
+    submission, even if they hold the admin role - separation of duties."""
+    record = await db.get(Analysis, thread_id)
+    if record is not None and record.requested_by == current_user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="You cannot review your own submission. Ask another admin to review this case.",
+        )
+
     graph = request.app.state.graph
     config = {"configurable": {"thread_id": thread_id}}
 
@@ -210,3 +222,80 @@ async def resume_analysis(
     response = _build_analysis_response(request_id, thread_id, symbol, result)
     await _save_analysis_record(db, response, current_user.id)
     return response
+
+
+@app.get("/analyses", response_model=list[AnalysisSummary])
+async def list_my_analyses(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns the current user's own analysis history, most recent first."""
+    result = await db.execute(
+        select(Analysis)
+        .where(Analysis.requested_by == current_user.id)
+        .order_by(Analysis.created_at.desc())
+    )
+    return result.scalars().all()
+
+
+@app.get("/analyses/{thread_id}", response_model=AnalysisResponse)
+async def get_analysis_detail(
+    thread_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns full detail for an analysis - the requester's own, or any
+    analysis at all if the current user is an admin."""
+    record = await db.get(Analysis, thread_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    if record.requested_by != current_user.id and current_user.role != "admin":
+        raise HTTPException(status_code=404, detail="Analysis not found")
+
+    return AnalysisResponse(
+        request_id=record.request_id,
+        thread_id=record.thread_id,
+        status=record.status,
+        symbol=record.symbol,
+        risk_score=record.risk_score,
+        risk_factors=record.risk_factors,
+        fraud_flag=record.fraud_flag,
+        fraud_confidence=record.fraud_confidence,
+        shap_explanation=record.shap_explanation,
+        requires_human_review=record.requires_human_review,
+        human_decision=record.human_decision,
+        recommendation=record.recommendation,
+        decision_rationale=record.decision_rationale,
+        final_report=record.final_report,
+        alerts_sent=record.alerts_sent or [],
+    )
+
+
+@app.get("/admin/pending-reviews", response_model=list[AdminPendingReview])
+async def list_pending_reviews(
+    current_user: User = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin-only: every OTHER user's cases currently awaiting review,
+    oldest first. Deliberately excludes the current admin's own
+    submissions - an admin reviewing their own flagged case would defeat
+    the separation-of-duties this role exists to enforce."""
+    result = await db.execute(
+        select(Analysis, User.email)
+        .join(User, Analysis.requested_by == User.id)
+        .where(Analysis.status == "pending_review")
+        .where(Analysis.requested_by != current_user.id)
+        .order_by(Analysis.created_at.asc())
+    )
+    return [
+        AdminPendingReview(
+            thread_id=a.thread_id,
+            symbol=a.symbol,
+            risk_score=a.risk_score,
+            fraud_flag=a.fraud_flag,
+            fraud_confidence=a.fraud_confidence,
+            requested_by_email=email,
+            created_at=a.created_at,
+        )
+        for a, email in result.all()
+    ]

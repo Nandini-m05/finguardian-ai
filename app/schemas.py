@@ -1,5 +1,6 @@
 from pydantic import BaseModel, EmailStr
 from typing import Literal
+from datetime import datetime
 
 
 class UserCreate(BaseModel):
@@ -11,6 +12,7 @@ class UserOut(BaseModel):
     id: int
     email: str
     is_active: bool
+    role: str
 
     class Config:
         from_attributes = True
@@ -41,3 +43,26 @@ class AnalysisResponse(BaseModel):
 
 class ResumeDecisionRequest(BaseModel):
     decision: Literal["approved", "rejected"]
+
+
+class AnalysisSummary(BaseModel):
+    thread_id: str
+    symbol: str
+    status: str
+    risk_score: float | None = None
+    recommendation: str | None = None
+    requires_human_review: bool | None = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class AdminPendingReview(BaseModel):
+    thread_id: str
+    symbol: str
+    risk_score: float | None = None
+    fraud_flag: bool | None = None
+    fraud_confidence: float | None = None
+    requested_by_email: str
+    created_at: datetime
